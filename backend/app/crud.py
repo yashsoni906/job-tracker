@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import asc, desc
+from sqlalchemy import asc, desc, func
 from app import models, schemas
 
 
@@ -92,3 +92,62 @@ def update_application_status(db: Session, application_id: int, new_status: sche
     db.commit()
 
     return db_application
+
+def get_response_rate(db: Session):
+    total = db.query(models.Application).count()
+    if total == 0:
+        return {"total_applications": 0, "responded": 0, "response_rate": 0.0}
+
+    responded = db.query(models.Application).filter(
+        models.Application.status != models.ApplicationStatus.applied
+    ).count()
+
+    return {
+        "total_applications": total,
+        "responded": responded,
+        "response_rate": round((responded / total) * 100, 1),
+    }
+
+def get_weekly_velocity(db: Session):
+    results = (
+        db.query(
+            func.date_trunc('week', models.Application.date_applied).label('week'),
+            func.count(models.Application.id).label('count')
+        )
+        .group_by('week')
+        .order_by('week')
+        .all()
+    )
+    return [{"week": row.week, "count": row.count} for row in results]
+
+def get_avg_time_to_response(db: Session):
+    # subquery: first two status_history rows per application, ordered by time
+    from sqlalchemy import select
+
+    applications_with_response = (
+        db.query(models.Application.id)
+        .join(models.StatusHistory)
+        .filter(models.StatusHistory.from_status.isnot(None))  # has had at least one transition
+        .distinct()
+        .all()
+    )
+
+    if not applications_with_response:
+        return {"average_days_to_response": None, "sample_size": 0}
+
+    diffs = []
+    for (app_id,) in applications_with_response:
+        history = (
+            db.query(models.StatusHistory)
+            .filter(models.StatusHistory.application_id == app_id)
+            .order_by(models.StatusHistory.changed_at)
+            .limit(2)
+            .all()
+        )
+        if len(history) == 2:
+            delta = history[1].changed_at - history[0].changed_at
+            diffs.append(delta.total_seconds() / 86400)  # convert to days
+
+    avg_days = round(sum(diffs) / len(diffs), 1) if diffs else None
+
+    return {"average_days_to_response": avg_days, "sample_size": len(diffs)}
